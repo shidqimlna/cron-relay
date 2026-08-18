@@ -20,25 +20,35 @@ api_search_page() {
 }
 
 # Paginates through all matching issues (capped at 5 pages / 500 items,
-# well above current pool sizes) so issues beyond the first 100 results
-# aren't silently dropped.
-api_search() {
+# well above current pool sizes). Writes the combined, trimmed item list
+# (number/title/html_url only) to $1. Uses temp files + --slurpfile
+# throughout instead of --argjson on large blobs, since passing a big
+# JSON array as a command-line argument can exceed the OS arg-length
+# limit ("Argument list too long").
+api_search_all() {
   local query="$1"
+  local out_file="$2"
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  echo '[]' > "$tmpdir/combined.json"
+
   local page=1
-  local all_items="[]"
-  local page_count
-
   while true; do
-    local resp
-    resp=$(api_search_page "$query" "$page")
+    local pagefile="$tmpdir/page.json"
+    api_search_page "$query" "$page" > "$pagefile"
 
-    if ! echo "$resp" | jq -e '.items' > /dev/null 2>&1; then
-      echo '{"items":null}'
+    if ! jq -e '.items' "$pagefile" > /dev/null 2>&1; then
+      echo "null" > "$out_file"
+      rm -rf "$tmpdir"
       return
     fi
 
-    all_items=$(jq -n --argjson a "$all_items" --argjson b "$(echo "$resp" | jq -c '.items')" '$a + $b')
-    page_count=$(echo "$resp" | jq '.items | length')
+    jq '[.items[] | {number, title, html_url}]' "$pagefile" > "$tmpdir/items.json"
+    jq -s '.[0] + .[1]' "$tmpdir/combined.json" "$tmpdir/items.json" > "$tmpdir/combined_new.json"
+    mv "$tmpdir/combined_new.json" "$tmpdir/combined.json"
+
+    local page_count
+    page_count=$(jq 'length' "$tmpdir/items.json")
 
     if [ "$page_count" -lt 100 ] || [ "$page" -ge 5 ]; then
       break
@@ -46,7 +56,8 @@ api_search() {
     page=$((page + 1))
   done
 
-  jq -n --argjson items "$all_items" '{items: $items}'
+  mv "$tmpdir/combined.json" "$out_file"
+  rm -rf "$tmpdir"
 }
 
 post_discord() {
@@ -62,37 +73,43 @@ process_category() {
   local query="$2"
   local label_emoji="$3"
 
-  local response
-  response=$(api_search "$query")
+  local items_file
+  items_file=$(mktemp)
+  api_search_all "$query" "$items_file"
 
-  if ! echo "$response" | jq -e '.items' > /dev/null 2>&1; then
+  if [ "$(cat "$items_file")" = "null" ]; then
     echo "WARN: bad response for $key, skipping"
+    rm -f "$items_file"
     return
   fi
 
   local initialized
   initialized=$(jq -r '.initialized' "$STATE_FILE")
 
-  local current_numbers
-  current_numbers=$(echo "$response" | jq '[.items[].number]')
-
-  local seen_numbers
-  seen_numbers=$(jq -c ".${key}" "$STATE_FILE")
+  local current_numbers_file
+  current_numbers_file=$(mktemp)
+  jq '[.[].number]' "$items_file" > "$current_numbers_file"
 
   if [ "$initialized" = "false" ]; then
-    jq --argjson nums "$current_numbers" ".${key} = \$nums" "$STATE_FILE" > tmp.json && mv tmp.json "$STATE_FILE"
-    echo "Seeded $key with $(echo "$current_numbers" | jq 'length') existing issues (no notifications sent)"
+    jq --slurpfile nums "$current_numbers_file" ".${key} = \$nums[0]" "$STATE_FILE" > tmp_state.json && mv tmp_state.json "$STATE_FILE"
+    echo "Seeded $key with $(jq 'length' "$current_numbers_file") existing issues (no notifications sent)"
+    rm -f "$items_file" "$current_numbers_file"
     return
   fi
 
-  local new_items
-  new_items=$(echo "$response" | jq --argjson seen "$seen_numbers" '[.items[] | select(([.number] - $seen) | length > 0)]')
+  local seen_numbers_file
+  seen_numbers_file=$(mktemp)
+  jq -c ".${key}" "$STATE_FILE" > "$seen_numbers_file"
+
+  local new_items_file
+  new_items_file=$(mktemp)
+  jq --slurpfile seen "$seen_numbers_file" '[.[] | select(([.number] - $seen[0]) | length > 0)]' "$items_file" > "$new_items_file"
 
   local count
-  count=$(echo "$new_items" | jq 'length')
+  count=$(jq 'length' "$new_items_file")
 
   if [ "$count" -gt 0 ]; then
-    echo "$new_items" | jq -c '.[]' | while read -r item; do
+    jq -c '.[]' "$new_items_file" | while read -r item; do
       number=$(echo "$item" | jq -r '.number')
       title=$(echo "$item" | jq -r '.title')
       url=$(echo "$item" | jq -r '.html_url')
@@ -101,12 +118,15 @@ ${url}"
     done
   fi
 
-  local merged
-  merged=$(jq -n --argjson a "$seen_numbers" --argjson b "$current_numbers" '($a + $b) | unique | sort | .[-2000:]')
-  jq --argjson nums "$merged" ".${key} = \$nums" "$STATE_FILE" > tmp.json && mv tmp.json "$STATE_FILE"
+  local merged_file
+  merged_file=$(mktemp)
+  jq -s '(.[0] + .[1]) | unique | sort | .[-2000:]' "$seen_numbers_file" "$current_numbers_file" > "$merged_file"
+  jq --slurpfile nums "$merged_file" ".${key} = \$nums[0]" "$STATE_FILE" > tmp_state.json && mv tmp_state.json "$STATE_FILE"
+
+  rm -f "$items_file" "$current_numbers_file" "$seen_numbers_file" "$new_items_file" "$merged_file"
 }
 
 process_category "help_wanted" 'repo:Expensify/App is:open is:issue label:"Help Wanted"' "🟢 [Help Wanted]"
 process_category "external" 'repo:Expensify/App is:open is:issue label:External -label:"Help Wanted"' "🔵 [External]"
 
-jq '.initialized = true' "$STATE_FILE" > tmp.json && mv tmp.json "$STATE_FILE"
+jq '.initialized = true' "$STATE_FILE" > tmp_state.json && mv tmp_state.json "$STATE_FILE"
