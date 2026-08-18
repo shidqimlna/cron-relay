@@ -5,8 +5,9 @@ STATE_FILE="state.json"
 : "${DISCORD_WEBHOOK_URL:?missing}"
 : "${GH_TOKEN:?missing}"
 
-api_search() {
+api_search_page() {
   local query="$1"
+  local page="$2"
   curl -sS -G \
     -H "Authorization: Bearer $GH_TOKEN" \
     -H "Accept: application/vnd.github+json" \
@@ -14,7 +15,38 @@ api_search() {
     --data-urlencode "sort=created" \
     --data-urlencode "order=desc" \
     --data-urlencode "per_page=100" \
+    --data-urlencode "page=$page" \
     "https://api.github.com/search/issues"
+}
+
+# Paginates through all matching issues (capped at 5 pages / 500 items,
+# well above current pool sizes) so issues beyond the first 100 results
+# aren't silently dropped.
+api_search() {
+  local query="$1"
+  local page=1
+  local all_items="[]"
+  local page_count
+
+  while true; do
+    local resp
+    resp=$(api_search_page "$query" "$page")
+
+    if ! echo "$resp" | jq -e '.items' > /dev/null 2>&1; then
+      echo '{"items":null}'
+      return
+    fi
+
+    all_items=$(jq -n --argjson a "$all_items" --argjson b "$(echo "$resp" | jq -c '.items')" '$a + $b')
+    page_count=$(echo "$resp" | jq '.items | length')
+
+    if [ "$page_count" -lt 100 ] || [ "$page" -ge 5 ]; then
+      break
+    fi
+    page=$((page + 1))
+  done
+
+  jq -n --argjson items "$all_items" '{items: $items}'
 }
 
 post_discord() {
