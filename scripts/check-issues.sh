@@ -72,6 +72,7 @@ process_category() {
   local key="$1"
   local query="$2"
   local label_emoji="$3"
+  local mention="${4:-}"
 
   local items_file
   items_file=$(mktemp)
@@ -113,7 +114,7 @@ process_category() {
       number=$(echo "$item" | jq -r '.number')
       title=$(echo "$item" | jq -r '.title')
       url=$(echo "$item" | jq -r '.html_url')
-      post_discord "${label_emoji} #${number}: ${title}
+      post_discord "${mention}${label_emoji} #${number}: ${title}
 ${url}"
     done
   fi
@@ -126,7 +127,7 @@ ${url}"
   rm -f "$items_file" "$current_numbers_file" "$seen_numbers_file" "$new_items_file" "$merged_file"
 }
 
-process_category "help_wanted" 'repo:Expensify/App is:open is:issue label:"Help Wanted"' "🟢 [Help Wanted]"
+process_category "help_wanted" 'repo:Expensify/App is:open is:issue label:"Help Wanted"' "🟢 [Help Wanted]" "<@501002027241963522> "
 process_category "external" 'repo:Expensify/App is:open is:issue label:External -label:"Help Wanted"' "🔵 [External]"
 
 jq '.initialized = true' "$STATE_FILE" > tmp_state.json && mv tmp_state.json "$STATE_FILE"
