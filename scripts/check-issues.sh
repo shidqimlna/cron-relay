@@ -128,6 +128,5 @@ ${url}"
 }
 
 process_category "help_wanted" 'repo:Expensify/App is:open is:issue label:"Help Wanted"' "🟢 [Help Wanted]" "<@501002027241963522> "
-process_category "external" 'repo:Expensify/App is:open is:issue label:External -label:"Help Wanted"' "🔵 [External]"
 
 jq '.initialized = true' "$STATE_FILE" > tmp_state.json && mv tmp_state.json "$STATE_FILE"
